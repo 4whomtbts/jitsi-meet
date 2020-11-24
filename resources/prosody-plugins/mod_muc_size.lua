@@ -57,6 +57,12 @@ function verify_token(token, room_address)
         return false;
     end
 
+for k,v in pairs(session) do
+		            log("info", "key %s", tostring(k));
+		            log("info", "value %s", tostring(v));
+		        end
+		        
+		        
     if not token_util:verify_room(session, room_address) then
         log("warn", "Token %s not allowed to join: %s",
             tostring(token), tostring(room_address));
@@ -65,6 +71,44 @@ function verify_token(token, room_address)
 
     return true;
 end
+
+function verify_token_getrooms(token)
+    if not enableTokenVerification then
+        return true;
+    end
+
+    -- if enableTokenVerification is enabled and we do not have token
+    -- stop here, cause the main virtual host can have guest access enabled
+    -- (allowEmptyToken = true) and we will allow access to rooms info without
+    -- a token
+    if token == nil then
+        log("warn", "no token provided");
+        return false;
+    end
+
+    local session = {};
+    session.auth_token = token;
+    local verified, reason = token_util:process_and_verify_token(session);
+    if not verified then
+        log("warn", "not a valid token %s", tostring(reason));
+        return false;
+    end
+
+		        
+	
+	if (tostring(session.jitsi_meet_room) ~= "modrooms") then 
+    
+        log("warn", "Token %s %s not allowed to join modrooms",
+            tostring(token), tostring(session.jitsi_meet_room));
+        return false;
+    end
+
+    return true;
+end
+
+
+
+
 
 --- Handles request for retrieving the room size
 -- @param event the http event, holds the request query
@@ -176,6 +220,9 @@ function handle_get_room (event)
 	return json.encode(occupants_json);
 end;
 
+
+    
+    
 function tablelength(T)
         local hash = {}
         local res = {}
@@ -192,20 +239,52 @@ function tablelength(T)
         return count
 end
 
-function getNbConfPart() 
-    local tab={};
+local function has_value (tab, val)
+    for index, value in ipairs(tab) do
+        if value == val then
+            return true
+        end
+    end
 
-    --conferences count (without eliminating duplicates )
+    return false
+end
+
+function getNbConfPart(event) 
+	
+	local params = parse(event.request.url.query);
+	
+    local tab={};
+	local jitsi_meet_room = "";
+	local nbPart = 0
+	
+	
+	if not verify_token_getrooms(params["token"]) then
+        return 403;
+    end
+    
+    
+    --conference rooms count (with eliminating duplicates )
     for key, value in pairs(prosody.full_sessions) do
-            if tostring(value["username"]:lower()) ~= "focus" then
-                    table.insert(tab,tostring(value["jitsi_meet_room"]:lower()));
+            if (tostring(value["username"]:lower()) ~= "focus" and tostring(value["username"]:lower()) ~= "jibri" and value["jitsi_meet_room"] ~= nil) then
+	            log("info", "room %s", tostring(value));
+	            
+--	            for k,v in pairs(value) do
+--		            log("info", "key %s", tostring(k));
+--		            log("info", "value %s", tostring(v));
+--		        end
+		        jitsi_meet_room = tostring(value["jitsi_meet_room"]:lower());
+		        nbPart = nbPart + 1;
+		        
+		        if (has_value (tab, jitsi_meet_room)) then
+			    	log("info", "room %s already in table", tostring(jitsi_meet_room));
+			    else
+                    table.insert(tab,jitsi_meet_room);
+                   
+                end
             end
     end
 
-    local nbPart = 0
-    if it.count(it.keys(prosody.full_sessions))-1 >= 0 --participants count
-            then nbPart= it.count(it.keys(prosody.full_sessions))-1
-    end
+ 
 
     local nbConf = tablelength(tab) --conferences count
     if nbPart == 0
@@ -213,38 +292,15 @@ function getNbConfPart()
     end
 
      --create result as json
-    local result_json=array();
-    result_json:push({
-                    part= nbPart,
-                    conf=tablelength(tab) -- eliminates count number of rooms
-            });
+    local result_json={
+                    participants= nbPart,
+                    roomscount = nbConf,
+                    rooms = tab
+                    
+            };
 
     -- create json response 
     return json.encode(result_json);
-end
-
-function has_value(tab, val)
-   for _, value in ipairs(tab) do
-       if value == val then
-           return true
-       end
-   end
-   return false
-end
-
-function get_info_rooms()
-   local innerValues = {};
-   local keyRoom = "jitsi_bosh_query_room";
-   for _, value in pairs(prosody.full_sessions) do
-       if tostring(value["username"]:lower()) ~= "focus" then
-           for innerKey, innerValue in pairs(value) do
-               if innerKey == keyRoom and not has_value(innerValues, innerValue) then
-                   table.insert(innerValues, innerValue)
-               end
-           end
-       end
-   end
-return json.encode(innerValues);
 end
 
 function module.load()
@@ -256,7 +312,6 @@ function module.load()
 			["GET sessions"] = function () return tostring(it.count(it.keys(prosody.full_sessions))); end;
 			["GET room"] = function (event) return wrap_async_run(event,handle_get_room) end;
 			["GET nbConfPart"] = function (event) return wrap_async_run(event,getNbConfPart) end;
-      ["GET get-info-rooms"] = function (event) return wrap_async_run(event,get_info_rooms) end;
 		};
 	});
 end
