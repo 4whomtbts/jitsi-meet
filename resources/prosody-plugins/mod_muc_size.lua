@@ -280,6 +280,66 @@ function get_sessions(event)
     end
 end
 
+function get_raw_rooms(ahost)
+		local component = hosts[ahost];
+		if component then
+			local muc = component.modules.muc
+			if muc and rawget(muc,"all_rooms") then
+				return muc.all_rooms();
+			end
+		end
+	end
+	
+	function handle_get_all_rooms(event)
+		if (not event.request.url.query) then
+			return { status_code = 400; };
+		end
+	
+		local params = parse(event.request.url.query);
+		local domain_name = params["domain"];
+	
+		local raw_rooms = get_raw_rooms(domain_name);
+	
+		local rooms_json = array();
+	
+		for room in raw_rooms do
+	
+			local room_jid = room.jid;
+			local participant_count = 0;
+			local occupants_json = array();
+			local occupants = room._occupants;
+			if occupants then
+				for _, occupant in room:each_occupant() do
+					-- filter focus as we keep it as hidden participant
+					if string.sub(occupant.nick,-string.len("/focus"))~="/focus" then
+						for _, pr in occupant:each_session() do
+							participant_count = participant_count + 1;
+							local nick = pr:get_child_text("nick", "http://jabber.org/protocol/nick") or "";
+							local email = pr:get_child_text("email") or "";
+							occupants_json:push({
+								jid = tostring(occupant.nick),
+								email = tostring(email),
+								display_name = tostring(nick)});
+						end
+					end
+				end
+			end
+	
+			rooms_json:push({
+				jid = room_jid,
+				participant_count = participant_count,
+				participants = occupants_json
+			});
+	
+		end
+	
+		local result_json={
+			rooms = rooms_json;
+		};
+		-- create json response
+		return { status_code = 200; body = json.encode(result_json); };
+	end
+
 function module.load()
     module:depends("http");
 	module:provides("http", {
@@ -288,7 +348,7 @@ function module.load()
 			["GET room-size"] = function (event) return async_handler_wrapper(event,handle_get_room_size) end;
 			["GET sessions"] = function (event) return async_handler_wrapper(event,get_sessions) end;
             ["GET room"] = function (event) return async_handler_wrapper(event,handle_get_room) end;
-            ["GET room-list"] = function (event) return async_handler_wrapper(event,handle_list_room) end;
+			["GET all-rooms"] = function (event) return async_handler_wrapper(event,handle_get_all_rooms) end;
 		};
 	});
 end
