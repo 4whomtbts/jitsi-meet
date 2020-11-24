@@ -1,25 +1,30 @@
 -- Prosody IM
 -- Copyright (C) 2017 Atlassian
--- Modifed by jenus (2020/03/28, License is same as Jitsi meet, See: https://github.com/jitsi/jitsi-meet/blob/master/LICENSE)
 --
-
 local jid = require "util.jid";
 local it = require "util.iterators";
 local json = require "util.json";
 local iterators = require "util.iterators";
 local array = require"util.array";
-local wrap_async_run = module:require "util".wrap_async_run;
+
+local have_async = pcall(require, "util.async");
+if not have_async then
+    module:log("error", "requires a version of Prosody with util.async");
+    return;
+end
+
+local async_handler_wrapper = module:require "util".async_handler_wrapper;
 
 local tostring = tostring;
 local neturl = require "net.url";
 local parse = neturl.parseQuery;
 
+local basexx = require "basexx";
 -- option to enable/disable room API token verifications
-local enableTokenVerification
-    = module:get_option_boolean("enable_roomsize_token_verification", false);
+local enableTokenVerification = true
 
 local token_util = module:require "token/util".new(module);
-local get_room_from_jid = module:require "util".get_room_from_jid;
+
 
 -- no token configuration but required
 if token_util == nil and enableTokenVerification then
@@ -34,13 +39,39 @@ local muc_domain_prefix
 
 local muc_component_host = module:get_option_string("muc_component");
 
---- Verifies room name, domain name with the values in the token
+--- Verifies if the user id admin with the values in the token
+function checkAffiliation(token)
+    if token then
+            -- Extract token body and decode it
+            local dotFirst = token:find("%.");
+            if dotFirst then
+                    local dotSecond = token:sub(dotFirst + 1):find("%.");
+                    if dotSecond then
+                            local bodyB64 = token:sub(dotFirst + 1, dotFirst + dotSecond - 1);
+                            local body = json.decode(basexx.from_url64(bodyB64));
+                            -- If user is a moderator, set their affiliation to be an owner
+                            if body["admin"] == true then
+                                    return true
+                            else
+                                    return false
+                            end;
+                    end;
+            end;
+    end;
+end;
+
+--- Verifies domain name with the values in the token
 -- @param token the token we received
 -- @param room_address the full room address jid
 -- @return true if values are ok or false otherwise
-function verify_token(token, room_address)
+function verify_token(token)
     if not enableTokenVerification then
         return true;
+    end
+
+    -- COMMENT BELOW THREE LINES IF YOU DON'T WANT ADMIN CHECK
+    if not checkAffiliation(token) then
+        return false;
     end
 
     -- if enableTokenVerification is enabled and we do not have token
@@ -59,12 +90,13 @@ function verify_token(token, room_address)
         log("warn", "not a valid token %s", tostring(reason));
         return false;
     end
+    -- UNCOMMENT BELOW FOUR LINES IF YOU WANT ROOM CHECK IN TOKEN
 
-    if not token_util:verify_room(session, room_address) then
-        log("warn", "Token %s not allowed to join: %s",
-            tostring(token), tostring(room_address));
-        return false;
-    end
+    -- if not token_util:verify_room(session, room_address) then
+    --     log("warn", "Token %s not allowed to join: %s",
+    --         tostring(token), tostring(room_address));
+    --     return false;
+    -- end
 
     return true;
 end
@@ -75,7 +107,7 @@ end
 --         tha value is without counting the focus.
 function handle_get_room_size(event)
     if (not event.request.url.query) then
-        return 400;
+        return { status_code = 400; };
     end
 
 	local params = parse(event.request.url.query);
@@ -90,8 +122,8 @@ function handle_get_room_size(event)
         room_address = "["..subdomain.."]"..room_address;
     end
 
-    if not verify_token(params["token"], room_address) then
-        return 403;
+    if not verify_token(params["token"]) then
+        return { status_code = 403; };
     end
 
 	local room = get_room_from_jid(room_address);
@@ -107,15 +139,14 @@ function handle_get_room_size(event)
 		log("debug",
             "there are %s occupants in room", tostring(participant_count));
 	else
-		log("debug", "no such room exists");
-		return 404;
+		return { status_code = 200; body = [[{"participants":]].."0"..[[}]] };
 	end
 
 	if participant_count > 1 then
 		participant_count = participant_count - 1;
 	end
 
-	return [[{"participants":]]..participant_count..[[}]];
+	return { status_code = 200; body = [[{"participants":]]..participant_count..[[}]] };
 end
 
 --- Handles request for retrieving the room participants details
@@ -123,7 +154,7 @@ end
 -- @return GET response, containing a json with participants details
 function handle_get_room (event)
     if (not event.request.url.query) then
-        return 400;
+        return { status_code = 400; };
     end
 
 	local params = parse(event.request.url.query);
@@ -133,12 +164,12 @@ function handle_get_room (event)
     local room_address
         = jid.join(room_name, muc_domain_prefix.."."..domain_name);
 
-    if subdomain ~= "" then
+    if subdomain and subdomain ~= "" then
         room_address = "["..subdomain.."]"..room_address;
     end
 
-    if not verify_token(params["token"], room_address) then
-        return 403;
+    if not verify_token(params["token"]) then
+        return { status_code = 403; };
     end
 
 	local room = get_room_from_jid(room_address);
@@ -168,44 +199,96 @@ function handle_get_room (event)
 		log("debug",
             "there are %s occupants in room", tostring(participant_count));
 	else
-		log("debug", "no such room exists");
-		return 404;
+		return { status_code = 200; body = json.encode(occupants_json); };
 	end
 
 	if participant_count > 1 then
 		participant_count = participant_count - 1;
 	end
 
-	return json.encode(occupants_json);
+	return { status_code = 200; body = json.encode(occupants_json); };
 end;
 
---- Handles request for retrieving the room lists
--- @param event the http event, holds the request query
--- @return GET response, containing a json with room lists
 function handle_list_room(event)
-    if muc_component_host == nil then
-        return json.encode({})
-    end
-    local component = hosts[muc_component_host]
-    local muc = component.modules.muc;
-    local room_names = {}
-
-    for room in muc.all_rooms() do
-        table.insert(room_names, tostring(room:get_name()))
+    if (not event.request.url.query) then
+        return { status_code = 400; };
     end
 
-    return json.encode(room_names)
+	local params = parse(event.request.url.query);
+	local room_name = params["room"];
+	local domain_name = params["domain"];
+    local subdomain = params["subdomain"];
+
+    local room_address
+        = jid.join(room_name, muc_domain_prefix.."."..domain_name);
+
+    if subdomain and subdomain ~= "" then
+        room_address = "["..subdomain.."]"..room_address;
+    end
+
+    if not verify_token(params["token"]) then
+        return { status_code = 403; };
+    end
+
+    local _, host = jid.split(room_address);
+    local component = hosts[host];
+    local room_names = array()
+    if component then
+        local muc = component.modules.muc
+        for room in muc.all_rooms() do
+            table.insert(room_names, tostring(room:get_name()))
+        end 
+    end
+    return { status_code = 200; body = json.encode(room_names); };
 end;
+
+
+function get_room_from_jid(room_jid)
+    local _, host = jid.split(room_jid);
+    local component = hosts[host];
+    if component then
+        local muc = component.modules.muc
+        if muc and rawget(muc,"rooms") then
+            -- We're running 0.9.x or 0.10 (old MUC API)
+            return muc.rooms[room_jid];
+        elseif muc and rawget(muc,"get_room_from_jid") then
+            -- We're running >0.10 (new MUC API)
+            return muc.get_room_from_jid(room_jid);
+        else
+           
+            return
+        end
+    end
+end
+
+function get_sessions(event)
+    if (not event.request.url.query) then
+        return { status_code = 400; };
+    end
+
+    local params = parse(event.request.url.query);
+    
+    if not verify_token(params["token"]) then
+        return { status_code = 403; };
+    else
+        local session_count = it.count(it.keys(prosody.full_sessions)) - 2;
+        if (session_count > 0) then
+            return { status_code = 200; body = tostring(session_count) };
+        else
+            return { status_code = 200; body = tostring(0) };
+        end
+    end
+end
 
 function module.load()
     module:depends("http");
 	module:provides("http", {
 		default_path = "/";
 		route = {
-			["GET room-size"] = function (event) return wrap_async_run(event,handle_get_room_size) end;
-			["GET sessions"] = function () return tostring(it.count(it.keys(prosody.full_sessions))); end;
-			["GET room"] = function (event) return wrap_async_run(event,handle_get_room) end;
-			["GET room-list"] = function (event) return wrap_async_run(event,handle_list_room) end;
+			["GET room-size"] = function (event) return async_handler_wrapper(event,handle_get_room_size) end;
+			["GET sessions"] = function (event) return async_handler_wrapper(event,get_sessions) end;
+            ["GET room"] = function (event) return async_handler_wrapper(event,handle_get_room) end;
+            ["GET room-list"] = function (event) return async_handler_wrapper(event,handle_list_room) end;
 		};
 	});
 end
