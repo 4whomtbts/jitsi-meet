@@ -1,5 +1,6 @@
 -- Prosody IM
 -- Copyright (C) 2017 Atlassian
+-- Modifed by jenus (2020/03/28, License is same as Jitsi meet, See: https://github.com/jitsi/jitsi-meet/blob/master/LICENSE)
 --
 
 local jid = require "util.jid";
@@ -31,6 +32,8 @@ end
 local muc_domain_prefix
     = module:get_option_string("muc_mapper_domain_prefix", "conference");
 
+local muc_component_host = module:get_option_string("muc_component");
+
 --- Verifies room name, domain name with the values in the token
 -- @param token the token we received
 -- @param room_address the full room address jid
@@ -57,12 +60,6 @@ function verify_token(token, room_address)
         return false;
     end
 
-for k,v in pairs(session) do
-		            log("info", "key %s", tostring(k));
-		            log("info", "value %s", tostring(v));
-		        end
-		        
-		        
     if not token_util:verify_room(session, room_address) then
         log("warn", "Token %s not allowed to join: %s",
             tostring(token), tostring(room_address));
@@ -71,44 +68,6 @@ for k,v in pairs(session) do
 
     return true;
 end
-
-function verify_token_getrooms(token)
-    if not enableTokenVerification then
-        return true;
-    end
-
-    -- if enableTokenVerification is enabled and we do not have token
-    -- stop here, cause the main virtual host can have guest access enabled
-    -- (allowEmptyToken = true) and we will allow access to rooms info without
-    -- a token
-    if token == nil then
-        log("warn", "no token provided");
-        return false;
-    end
-
-    local session = {};
-    session.auth_token = token;
-    local verified, reason = token_util:process_and_verify_token(session);
-    if not verified then
-        log("warn", "not a valid token %s", tostring(reason));
-        return false;
-    end
-
-		        
-	
-	if (tostring(session.jitsi_meet_room) ~= "modrooms") then 
-    
-        log("warn", "Token %s %s not allowed to join modrooms",
-            tostring(token), tostring(session.jitsi_meet_room));
-        return false;
-    end
-
-    return true;
-end
-
-
-
-
 
 --- Handles request for retrieving the room size
 -- @param event the http event, holds the request query
@@ -220,88 +179,23 @@ function handle_get_room (event)
 	return json.encode(occupants_json);
 end;
 
+--- Handles request for retrieving the room lists
+-- @param event the http event, holds the request query
+-- @return GET response, containing a json with room lists
+function handle_list_room(event)
+    if muc_component_host == nil then
+        return json.encode({})
+    end
+    local component = hosts[muc_component_host]
+    local muc = component.modules.muc;
+    local room_names = {}
 
-    
-    
-function tablelength(T)
-        local hash = {}
-        local res = {}
-
-        for _,v in ipairs(T) do
-           if (not hash[v]) then
-               res[#res+1] = v
-               hash[v] = true
-           end
-        end
-
-        local count = 0
-        for _ in pairs(res) do count = count + 1 end
-        return count
-end
-
-local function has_value (tab, val)
-    for index, value in ipairs(tab) do
-        if value == val then
-            return true
-        end
+    for room in muc.all_rooms() do
+        table.insert(room_names, tostring(room:get_name()))
     end
 
-    return false
-end
-
-function getNbConfPart(event) 
-	
-	local params = parse(event.request.url.query);
-	
-    local tab={};
-	local jitsi_meet_room = "";
-	local nbPart = 0
-	
-	
-	if not verify_token_getrooms(params["token"]) then
-        return 403;
-    end
-    
-    
-    --conference rooms count (with eliminating duplicates )
-    for key, value in pairs(prosody.full_sessions) do
-            if (tostring(value["username"]:lower()) ~= "focus" and tostring(value["username"]:lower()) ~= "jibri" and value["jitsi_meet_room"] ~= nil) then
-	            log("info", "room %s", tostring(value));
-	            
---	            for k,v in pairs(value) do
---		            log("info", "key %s", tostring(k));
---		            log("info", "value %s", tostring(v));
---		        end
-		        jitsi_meet_room = tostring(value["jitsi_meet_room"]:lower());
-		        nbPart = nbPart + 1;
-		        
-		        if (has_value (tab, jitsi_meet_room)) then
-			    	log("info", "room %s already in table", tostring(jitsi_meet_room));
-			    else
-                    table.insert(tab,jitsi_meet_room);
-                   
-                end
-            end
-    end
-
- 
-
-    local nbConf = tablelength(tab) --conferences count
-    if nbPart == 0
-            then nbConf=0
-    end
-
-     --create result as json
-    local result_json={
-                    participants= nbPart,
-                    roomscount = nbConf,
-                    rooms = tab
-                    
-            };
-
-    -- create json response 
-    return json.encode(result_json);
-end
+    return json.encode(room_names)
+end;
 
 function module.load()
     module:depends("http");
@@ -311,7 +205,7 @@ function module.load()
 			["GET room-size"] = function (event) return wrap_async_run(event,handle_get_room_size) end;
 			["GET sessions"] = function () return tostring(it.count(it.keys(prosody.full_sessions))); end;
 			["GET room"] = function (event) return wrap_async_run(event,handle_get_room) end;
-			["GET nbConfPart"] = function (event) return wrap_async_run(event,getNbConfPart) end;
+			["GET room-list"] = function (event) return wrap_async_run(event,handle_list_room) end;
 		};
 	});
 end
