@@ -7,14 +7,7 @@ local it = require "util.iterators";
 local json = require "util.json";
 local iterators = require "util.iterators";
 local array = require"util.array";
-
-local have_async = pcall(require, "util.async");
-if not have_async then
-    module:log("error", "requires a version of Prosody with util.async");
-    return;
-end
-
-local async_handler_wrapper = module:require "util".async_handler_wrapper;
+local wrap_async_run = module:require "util".wrap_async_run;
 
 local tostring = tostring;
 local neturl = require "net.url";
@@ -64,6 +57,12 @@ function verify_token(token, room_address)
         return false;
     end
 
+for k,v in pairs(session) do
+		            log("info", "key %s", tostring(k));
+		            log("info", "value %s", tostring(v));
+		        end
+		        
+		        
     if not token_util:verify_room(session, room_address) then
         log("warn", "Token %s not allowed to join: %s",
             tostring(token), tostring(room_address));
@@ -73,13 +72,51 @@ function verify_token(token, room_address)
     return true;
 end
 
+function verify_token_getrooms(token)
+    if not enableTokenVerification then
+        return true;
+    end
+
+    -- if enableTokenVerification is enabled and we do not have token
+    -- stop here, cause the main virtual host can have guest access enabled
+    -- (allowEmptyToken = true) and we will allow access to rooms info without
+    -- a token
+    if token == nil then
+        log("warn", "no token provided");
+        return false;
+    end
+
+    local session = {};
+    session.auth_token = token;
+    local verified, reason = token_util:process_and_verify_token(session);
+    if not verified then
+        log("warn", "not a valid token %s", tostring(reason));
+        return false;
+    end
+
+		        
+	
+	if (tostring(session.jitsi_meet_room) ~= "modrooms") then 
+    
+        log("warn", "Token %s %s not allowed to join modrooms",
+            tostring(token), tostring(session.jitsi_meet_room));
+        return false;
+    end
+
+    return true;
+end
+
+
+
+
+
 --- Handles request for retrieving the room size
 -- @param event the http event, holds the request query
 -- @return GET response, containing a json with participants count,
 --         tha value is without counting the focus.
 function handle_get_room_size(event)
     if (not event.request.url.query) then
-        return { status_code = 400; };
+        return 400;
     end
 
 	local params = parse(event.request.url.query);
@@ -95,7 +132,7 @@ function handle_get_room_size(event)
     end
 
     if not verify_token(params["token"], room_address) then
-        return { status_code = 403; };
+        return 403;
     end
 
 	local room = get_room_from_jid(room_address);
@@ -112,14 +149,14 @@ function handle_get_room_size(event)
             "there are %s occupants in room", tostring(participant_count));
 	else
 		log("debug", "no such room exists");
-		return { status_code = 404; };
+		return 404;
 	end
 
 	if participant_count > 1 then
 		participant_count = participant_count - 1;
 	end
 
-	return { status_code = 200; body = [[{"participants":]]..participant_count..[[}]] };
+	return [[{"participants":]]..participant_count..[[}]];
 end
 
 --- Handles request for retrieving the room participants details
@@ -127,7 +164,7 @@ end
 -- @return GET response, containing a json with participants details
 function handle_get_room (event)
     if (not event.request.url.query) then
-        return { status_code = 400; };
+        return 400;
     end
 
 	local params = parse(event.request.url.query);
@@ -137,12 +174,12 @@ function handle_get_room (event)
     local room_address
         = jid.join(room_name, muc_domain_prefix.."."..domain_name);
 
-    if subdomain and subdomain ~= "" then
+    if subdomain ~= "" then
         room_address = "["..subdomain.."]"..room_address;
     end
 
     if not verify_token(params["token"], room_address) then
-        return { status_code = 403; };
+        return 403;
     end
 
 	local room = get_room_from_jid(room_address);
@@ -173,25 +210,108 @@ function handle_get_room (event)
             "there are %s occupants in room", tostring(participant_count));
 	else
 		log("debug", "no such room exists");
-		return { status_code = 404; };
+		return 404;
 	end
 
 	if participant_count > 1 then
 		participant_count = participant_count - 1;
 	end
 
-	return { status_code = 200; body = json.encode(occupants_json); };
+	return json.encode(occupants_json);
 end;
+
+
+    
+    
+function tablelength(T)
+        local hash = {}
+        local res = {}
+
+        for _,v in ipairs(T) do
+           if (not hash[v]) then
+               res[#res+1] = v
+               hash[v] = true
+           end
+        end
+
+        local count = 0
+        for _ in pairs(res) do count = count + 1 end
+        return count
+end
+
+local function has_value (tab, val)
+    for index, value in ipairs(tab) do
+        if value == val then
+            return true
+        end
+    end
+
+    return false
+end
+
+function getNbConfPart(event) 
+	
+	local params = parse(event.request.url.query);
+	
+    local tab={};
+	local jitsi_meet_room = "";
+	local nbPart = 0
+	
+	
+	if not verify_token_getrooms(params["token"]) then
+        return 403;
+    end
+    
+    
+    --conference rooms count (with eliminating duplicates )
+    for key, value in pairs(prosody.full_sessions) do
+            if (tostring(value["username"]:lower()) ~= "focus" and tostring(value["username"]:lower()) ~= "jibri" and value["jitsi_meet_room"] ~= nil) then
+	            log("info", "room %s", tostring(value));
+	            
+--	            for k,v in pairs(value) do
+--		            log("info", "key %s", tostring(k));
+--		            log("info", "value %s", tostring(v));
+--		        end
+		        jitsi_meet_room = tostring(value["jitsi_meet_room"]:lower());
+		        nbPart = nbPart + 1;
+		        
+		        if (has_value (tab, jitsi_meet_room)) then
+			    	log("info", "room %s already in table", tostring(jitsi_meet_room));
+			    else
+                    table.insert(tab,jitsi_meet_room);
+                   
+                end
+            end
+    end
+
+ 
+
+    local nbConf = tablelength(tab) --conferences count
+    if nbPart == 0
+            then nbConf=0
+    end
+
+     --create result as json
+    local result_json={
+                    participants= nbPart,
+                    roomscount = nbConf,
+                    rooms = tab
+                    
+            };
+
+    -- create json response 
+    return json.encode(result_json);
+end
 
 function module.load()
     module:depends("http");
 	module:provides("http", {
 		default_path = "/";
 		route = {
-			["GET room-size"] = function (event) return async_handler_wrapper(event,handle_get_room_size) end;
+			["GET room-size"] = function (event) return wrap_async_run(event,handle_get_room_size) end;
 			["GET sessions"] = function () return tostring(it.count(it.keys(prosody.full_sessions))); end;
-			["GET room"] = function (event) return async_handler_wrapper(event,handle_get_room) end;
+			["GET room"] = function (event) return wrap_async_run(event,handle_get_room) end;
+			["GET nbConfPart"] = function (event) return wrap_async_run(event,getNbConfPart) end;
 		};
 	});
 end
-
